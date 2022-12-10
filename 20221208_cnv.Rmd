@@ -1,0 +1,426 @@
+---
+title: "Reanalysis Grant Bioinformatician Exercise"
+author: "Min Wang"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+header-includes:
+    - \usepackage{setspace}\doublespacing
+    - \usepackage{color}
+    - \usepackage{caption}
+    - \usepackage{anysize}
+output: 
+    html_document:
+        toc: true
+        top_float: true
+        top_depth: 5
+        theme: "cosmo"
+params:
+    inpath1: ""
+    infile1: ""
+    inpath: ""
+---
+
+<style type="text/css">
+
+h1.title {
+  font-size: 30px;
+  font-style: Georgia;
+  font-weight: bold;
+}
+h1.author {
+  font-size: 23px;
+  font-style: Times New Roman;
+}
+h1.date {
+  font-size: 22px;
+  font-style: Arial;
+}
+h2 { /* Header 2 */
+  font-size: 22px;
+  font-style: Times New Roman;
+  color: #00CCFF;
+}
+body{
+  font-size: 15px;
+}
+a {
+  color: #2c87f0;
+}
+a:visited {
+  color: #483D8B;
+}
+a:hover {
+  color:#c33333;
+}
+a:active {
+  color:#FF9900;
+}
+a:focus {
+  color:#00CC66;
+}
+
+</style>
+
+
+## Background
+
+<span style="color:green;font-size:16px;font-style:Arial">
+The exercise was originally posted
+[here](https://docs.google.com/document/d/1sw98QNgSVr0WjTzDB8sHa1H-pULjU31qvLO39dfTcVw/edit#).
+</span>
+
+<span style="color:green;font-size:16px;font-style:Arial">
+The dataset for testing was cloned from
+[here](https://gitlab.com/ssadedin/cnv_data_exercise).
+</span>
+
+
+## Set Up 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+``` {r get R libraries, echo = TRUE, results = FALSE, error = FALSE, warning = FALSE, message = FALSE}
+# Get R libraries
+list.of.packages <- c('data.table', 'purrr', 'ggplot2', 'ggfortify',
+                      'factoextra', 'FactoMineR', 'corrplot', 'ggpubr', 'outliers')
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages)
+lapply(list.of.packages, require, character.only = TRUE)
+
+# Get Bioconductor libraries
+if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+list.of.packages <- c('Rsamtools', 'GenomicFeatures', 'GenomicAlignments', 'BiocParallel')
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) BiocManager::install(new.packages)
+lapply(list.of.packages, require, character.only = TRUE)
+
+options(scipen = 999) # force not to use scienteific notation
+set.seed(1234)
+```
+
+```{r load data, echo = FALSE}
+inpath1 <- file.path(dirname(params$inpath), basename(dirname(params$inpath1)), basename(params$inpath1))
+infile1 <- file.path(dirname(params$inpath), basename(dirname(dirname(params$infile1))), 
+                     basename(dirname(params$infile1)), basename(params$infile1))
+dir.create('results', showWarnings = FALSE)
+```
+
+
+The list of bam files have been loaded as the `bamfiles` object.
+
+```{r get bam files}
+filenames <- list.files(path = inpath1, pattern = 'bam$',
+                        all.files = TRUE, full.names = TRUE, recursive = TRUE)
+bamfiles <- BamFileList(filenames, yieldSize=2000000)
+bamfiles
+```
+
+The target regions have been loaded as the `gr` object. 
+
+```{r get target gaps}
+data <- fread(infile1, header = FALSE)
+setnames(data, c('chr', 'start', 'end', 'width'))
+gr <- sort(as(data, 'GRanges'))
+gr
+n <- length(gr)
+x <- end(gr)[1:n-1]
+y <- start(gr)[2:n]
+z <- abs(x-y)
+```
+
+The vector below shows that most target regions are far away from each other,
+with gaps larger than the expected read length (i.e. 150bp),
+although there are two target regions close to each other,
+with a gap of `r min(z)`bp in between.   \
+
+```{r explore target regions}
+sort(z)
+```
+
+Our read counting method below will work for most target regions except this one.   \
+  \
+
+
+## Get Read Counts 
+
+<span style="color:#6699FF;font-size:18px">
+1. We would like to know the count of reads that overlap each target region 
+for each sample. Use a command line tool or notebook / script to create a file 
+containing a matrix of the read counts where the columns are the target regions 
+and the rows are the read counts.  \
+</span>
+
+<span style="color:#6699FF;font-size:18px">
+Your answer should look approximately like the file provided in 
+example_results/counts.tsv (exact answers may vary due to subtle issues of 
+how read overlaps or boundaries are considered - do not worry about this).
+</span>
+
+
+```{r get read counts}
+# mode = "Union" : (Default) Reads that overlap any portion of exactly one feature are counted. 
+#                  Reads that overlap multiple features are discarded. 
+#                  This is the most conservative of the 3 modes.
+# fragments = FALSE: (Default FALSE) A logical; applied to paired-end data only.
+#                    ‘fragments’ controls which function is used to read the data which subsequently 
+#                    affects which records are included in counting.
+#                    When ‘fragments=FALSE’, data are read with ‘readGAlignmentPairs’ and returned 
+#                    in a ‘GAlignmentPairs’ class. 
+#                    In this case, singletons, reads with unmapped pairs, and other fragments, are dropped.
+se <- summarizeOverlaps(features = gr, reads = bamfiles,
+                        mode = "Union", singleEnd = FALSE,
+                        ignore.strand = TRUE, fragments = FALSE)
+tmp1 <- t(assay(se))
+colnames(tmp1) <- paste(as.character(seqnames(gr)), paste(start(gr), end(gr), sep = '-'), sep = ':')
+tmp2 <-  as.matrix(x = gsub('.bam', '', rownames(tmp1)), ncol = 1)
+colnames(tmp2) <- 'sample'
+data <- cbind(as.data.table(tmp2), as.data.table(tmp1))
+data[1:2, 1:4]
+write.table(x = data, file = 'results/counts.tsv', append = FALSE, 
+            quote = FALSE, sep = '\t', row.names = FALSE, col.names = TRUE)
+```
+  \
+      
+
+<span style="color:#6699FF;font-size:18px">
+2. Use your preferred data analysis language to normalise each sample 
+by dividing out its mean coverage - save this file as results/mean.counts.tsv
+</span>
+
+```{r get normalised read counts}
+dat <- data[, grep('chr', names(data), value = TRUE), with = FALSE]
+res <- data.table(sample = data$sample, mean_coverage = rowMeans(dat))
+res[1:2,]
+write.table(x = res, file = 'results/mean.counts.tsv', append = FALSE, 
+            quote = FALSE, sep = '\t', row.names = FALSE, col.names = TRUE)
+```
+  \
+      
+
+## Get PCA 
+
+<span style="color:#6699FF;font-size:18px">
+3. Create a PCA plot of the mean counts showing the first two 
+principle components (paste a picture of it here), and show 
+the code or commands you used to create it.
+</span>
+
+```{r get pca, fig.align = 'center'}
+dat[1:2, 1:3]
+res.pca <- PCA(dat, graph = FALSE)
+fviz_pca_ind(res.pca,
+             col.ind = "cos2", pointsize = "cos2",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE # Avoid text overlapping (slow if many points)
+             )
+```
+  \
+        
+
+## Intepret PCA 
+
+<span style="color:#6699FF;font-size:18px">
+4. Describe what you see in the PCA plot. Can you interpret anything from the data?
+</span>
+
+The PCA plot above shows that:
+
+* The first principal component (PC1) explains 41.4% variation of read counts in the dataset (x-axis).  \
+* The second principal component (PC2) explains 8.7% variation of read counts in the dataset (y-axis).  \
+* Individual 4 has a read count profile most different from other individuals, shown as
+the largest dot size in red colour furtherest away from the centre of the coordinates. \
+* Individual 5 has a read count profile second the most different from other individuals,
+shown as the second largest dot size in orange colour also further away from the centre of the coordinates. \
+  \
+
+
+The eigenvalues for each PC are listed below. \
+
+* The first 2 PCs explain 50% of variation of read counts.  \
+* The first 5 PCs explain 70% variation of read counts.  \
+
+```{r get eig}
+eig.val <- get_eigenvalue(res.pca)
+eig.val
+```
+
+   \
+
+
+## Special Samples 
+
+<span style="color:#6699FF;font-size:18px">
+5. Based on your findings, are there any particular samples 
+you would recommend to treat specially or differently in this data?
+</span>
+
+To identify whether or not there are outliers in the dataset, the target region 
+with the most varied read counts was selected.  \
+An Grubbs's test was performed to detect whether or not there are outliers
+in the most varied target region.   \
+No outlier was identified, indicating that no sample or target region needs
+to be removed due to potential technical errors.  \
+
+```{r dimdesc}
+plvl <- 0.01
+res.desc <- dimdesc(res.pca, axes = 1, proba = plvl)
+cns <- rownames(res.desc$Dim.1[[1]])[1]
+x <- array(dat[, cns, with = F])[[1]]
+grubbs.test(x)
+```
+  \
+
+
+<span style="color:#6699FF;font-size:18px">
+6. If you identified any samples, can you interpret anything about them?
+</span>
+
+To identify candidate heterozygous deletion or duplication of target regions:  \
+Firstly, the answer to question 2, mean coverage by sample (data table below),
+has shown that across all target regions, individual 4 and 5 have the lowest and 
+highest mean read coverage among all individuals, respectively.  \
+The PCA plot agrees with the answer to question 2.  \
+```{r res2}
+res
+```
+  \
+
+
+The contribution plot below shows that read counts in target region
+`chrX:31679375-31679588` and `chrX:32472164-32472311` vary the most 
+among all individuals.  \
+```{r get contribution plot, fig.align = 'center'}
+fviz_contrib(res.pca, choice = "var", axes = 1, top = 10, xtickslab.rt = 90)
+```    
+  \
+
+
+The vector below shows that:
+
+* Individual 2 and 5 have the same read count in target region `chrX:31679375-31679588`. \
+* Individual 2 and 5 have the largest read count among all individuals.  \
+* Read counts of individual 2 and 5 are 1.35 times more than the mean read count of other individuals. \
+
+```{r get region 1}
+x <- dat$"chrX:31679375-31679588"
+dt <- x / mean(x)
+dt
+```
+  \
+
+The Q-Q plot below shows that individuals' read counts in this target region 
+are fairly normally distributed, as most dots falling on the diagonal straight line.  \
+
+```{r get Q-Q plot 1, fig.align = 'center'}
+qqnorm(x)
+qqline(x)
+```
+  \
+
+
+A one-sample t-test was performed to compare read counts of individual 2 and 5 
+with that of other individuals.  \
+The test examines whether or not the mean read counts of other individuals fewer
+than the read count of individual 2 and 5 is statistically significant, but the test 
+does not examine whether or not the difference in read counts is sufficient to 
+suggest a heterozyous duplication in individual 2 and 5.  \
+Results show that individual 2 and 5 have read counts statistically significantly
+ larger than other individuals in the target region.  \
+There are `r ncol(dat)` target regions.  \
+Multiple testings occur when a one-sample t-test is performed for each target region. \
+Given a p-value threshold of 0.01, after Bonferroni correction, the test p-value remains 
+significant, indicating that individual 2 and 5 may have a copy number duplication in 
+the target region `chrX:31679375-31679588`.  \
+This target region falls within an exon of the Duchenne muscular 
+dystrophy (DMD) gene, where copy number duplication is a known 
+mechanism of diseases ([Decipher](https://www.deciphergenomics.org/gene/DMD/browser) and 
+[GnomAD](https://gnomad.broadinstitute.org/gene/ENSG00000198947?dataset=gnomad_sv_r2_1)).  \
+Whether this candidate copy number duplication is relevant to 
+disease or not will depend on the clinical presentations of individaul 2 and 5.  \
+
+```{r t.test 1}
+ttest <- t.test(x = x[c(1, 3:4, 6:14)], mu = x[5], alternative = 'less')
+ttest 
+ttest$p.value < 0.01/ncol(dat)
+```
+
+  \
+
+
+The vector below shows that:
+
+* Individual 4 has the smallest read counts in target region `chrX:32472164-32472311` among all individuals.  \
+* Read counts of individual 4 is 0.65 times fewer than the mean read count of other individuals. \
+* Individual 5 has the largest read counts in target region `chrX:32472164-32472311` among all individuals.  \
+* Read counts of individual 5 is 1.45 times more than the mean read count of other individuals. \
+
+```{r get region 2}
+x <- dat$"chrX:32472164-32472311"
+dt <- x / mean(x)
+dt
+```
+  \
+
+The Q-Q plot below shows that individuals' read counts in this target region
+are fairly normally distributed, as most dots falling on the diagonal straight line.  \
+
+```{r get Q-Q plot 2, fig.align = 'center'}
+qqnorm(x)
+qqline(x)
+```
+  \
+
+
+A one-sample t-test was performed to compare read counts of individual 4 with 
+that of other individuals.   \
+The test examines whether or not the mean read counts of other individuals larger 
+than the read count of individual 4 is statistically significant, but the test
+does not examine whether or not the difference in read counts is sufficient to
+suggest a heterozyous deletion in individual 4.  \
+Results show that individual 4 has read counts statistically significantly fewer 
+than other individuals in the target region.  \
+There are 79 target regions.  \
+Multiple testings occur when a one-sample t-test is performed for each target region. \
+Given a p-value threshold of 0.01, after Bonferroni correction, the test p-value 
+remains significant, indicating that there could be a copy number deletion in the target region.  \
+This target region falls within an exon of the Duchenne muscular dystrophy (DMD) gene,
+where copy number deletion is a known mechanism of diseases
+([Decipher](https://www.deciphergenomics.org/gene/DMD/browser) and
+[GnomAD](https://gnomad.broadinstitute.org/gene/ENSG00000198947?dataset=gnomad_sv_r2_1)).  \
+Whether or not this candidate copy number deletion is relevant to disease will depend
+on the clinical presentation of individaul 4.  \
+
+```{r t.test 2}
+ttest <- t.test(x = x[c(1:3, 5:14)], mu = x[4], alternative = 'greater')
+ttest
+ttest$p.value < 0.01/ncol(dat)
+```
+  \
+
+
+A one-sample t-test was performed to compare read counts of individual 5 with 
+that of other individuals.  \
+The test examines whether or not the mean read counts of other individuals fewer
+than the read count of individual 5 is statistically significant, but the test
+does not examine whether or not the difference in read counts is sufficient to
+suggest a heterozyous duplication in individual 5.  \
+Results show that individual 5 has read counts statistically significantly larger 
+than rest of the individuals in the target region.  \
+There are 79 target regions.  \
+Given a p-value threshold of 0.01, after Bonferroni correction, the test p-value
+remains significant, indicating that there could be a copy number duplication in the target region.  \
+The target region falls within an exon of the Duchenne muscular dystrophy (DMD) gene,
+where copy number duplication is a known mechanism of diseases
+([Decipher](https://www.deciphergenomics.org/gene/DMD/browser) and
+[GnomAD](https://gnomad.broadinstitute.org/gene/ENSG00000198947?dataset=gnomad_sv_r2_1)).  \
+Whether or not this candidate copy number duplication is relevant to disease will depend
+on the clinical presentation of individaul 5.  \
+
+```{r t.test 3}
+ttest <- t.test(x = x[c(1:4, 6:14)], mu = x[5], alternative = 'less')
+ttest
+ttest$p.value < 0.01/ncol(dat)
+```
+  \
+
